@@ -141,7 +141,7 @@ storage:
           [ -n "$(ls /opt/bootkube/assets/manifests-*/* 2>/dev/null)" ] && \
             mv /opt/bootkube/assets/manifests-*/* /opt/bootkube/assets/manifests && \
             rm -rf /opt/bootkube/assets/manifests-*
-          
+
           BOOTKUBE_ACI="${BOOTKUBE_ACI:-quay.io/coreos/bootkube}"
           BOOTKUBE_VERSION="${BOOTKUBE_VERSION:-v0.9.1}"
           BOOTKUBE_ASSETS="${BOOTKUBE_ASSETS:-/opt/bootkube/assets}"
@@ -365,7 +365,7 @@ systemd:
           --cluster_domain=cluster.local \
           --cni-conf-dir=/etc/kubernetes/cni/net.d \
           --exit-on-lock-contention \
-          --hostname-override=${COREOS_PUBLIC_IPV4} \
+          --hostname-override=${COREOS_PRIVATE_IPV4} \
           --kubeconfig=/etc/kubernetes/kubeconfig \
           --lock-file=/var/run/lock/kubelet.lock \
           --network-plugin=cni \

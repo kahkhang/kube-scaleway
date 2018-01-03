@@ -90,7 +90,11 @@ read_worker_plan() {
 }
 
 get_ip() {
-  scw ps -a --no-trunc | grep $1 | grep -E -o '(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)'
+  scw inspect $1 | jq '.[0].public_ip.address' | sed 's/"//g'
+}
+
+get_private_ip() {
+  scw inspect $1 | jq '.[0].private_ip' | sed 's/"//g'
 }
 
 scw_ssh() {
@@ -118,6 +122,10 @@ echo "export master_id=$master_id"
 #export master_id=dfc45d07-c9e4-4951-9bf1-73006191037f
 scw exec -w "$(scw start $master_id)" "echo started";
 
+master_ip="$(get_ip $master_id)"
+private_ip="$(get_private_ip $master_id)"
+echo $master_ip
+echo $private_ip
 [ -e container-linux-config.json ] && rm -rf container-linux-config.json
 cat controller-config.json.tmpl | sed "s/\$SSH_KEY/$(cat ~/.ssh/id_rsa.pub | sed 's/\//\\\//g')/g" > container-linux-config.json
 while true; do scw cp install-coreos.sh $master_id:/root && break || sleep 10; done
@@ -128,11 +136,9 @@ while true; do scw_ssh $master_id "sudo chown -R core:core /home/core" && break 
 scw_ssh $master_id "sudo systemctl start bootkube"
 [ -e $DIR/cluster ] && rm -rf $DIR/cluster
 mkdir $DIR/cluster
-IP="$(get_ip $1)"
-scp -i ~/.ssh/id_rsa -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -r core@${IP}:/home/core/assets/* $DIR/cluster
-ssh -i ~/.ssh/id_rsa -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -tt "core@$IP" "rm -rf /home/core/bootstrap.sh"
+IP="$(get_ip $master_id)"
+scw_ssh $master_id "sudo chown -R core:core /opt/bootkube/assets"
+scp -i ~/.ssh/id_rsa -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -r core@${IP}:/opt/bootkube/assets/* $DIR/cluster
 mkdir -p $HOME/.kube
-if [ -e $HOME/.kube/config ]; then
-  yes | cp $HOME/.kube/config $HOME/.kube/config.bak
-fi
+[ -e $HOME/.kube/config ] && yes | cp $HOME/.kube/config $HOME/.kube/config.bak
 yes | cp $DIR/cluster/auth/kubeconfig $HOME/.kube/config

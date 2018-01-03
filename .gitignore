@@ -1,5 +1,6 @@
 container-linux-config.json
 testing.sh
+testing.sh.bak
 settings.env
 scaleway_bash.sh
 cluster/
