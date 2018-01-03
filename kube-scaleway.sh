@@ -114,7 +114,8 @@ echo $worker_size
 
 #master_id="$(scw create --commercial-type=$master_plan --bootscript=8fd15f37-c176-49a4-9e1d-10eb912942ea --env="boot=live rescue_image=http://j.mp/scaleway-ubuntu-trusty-tarball" $master_size)"
 master_id="$(scw create --commercial-type=$master_plan --bootscript=rescue $master_size)"
-echo $master_id
+echo "export master_id=$master_id"
+#export master_id=dfc45d07-c9e4-4951-9bf1-73006191037f
 scw exec -w "$(scw start $master_id)" "echo started";
 
 [ -e container-linux-config.json ] && rm -rf container-linux-config.json
@@ -124,7 +125,7 @@ while true; do scw cp container-linux-config.json $master_id:/root && break || s
 while true; do scw exec $master_id "chmod +x /root/install-coreos.sh && /root/install-coreos.sh" && break || sleep 5; done
 ./scw-reboot.expect "$(scw restart $master_id)" "sanboot --no-describe --drive 0x80"
 while true; do scw_ssh $master_id "sudo chown -R core:core /home/core" && break || sleep 5; done
-scw_ssh $master_id "sudo ./bootstrap.sh"
+scw_ssh $master_id "sudo systemctl start bootkube"
 [ -e $DIR/cluster ] && rm -rf $DIR/cluster
 mkdir $DIR/cluster
 IP="$(get_ip $1)"
