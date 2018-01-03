@@ -128,7 +128,7 @@ while true; do scw_ssh $master_id "sudo chown -R core:core /home/core" && break 
 scw_ssh $master_id "sudo systemctl start bootkube"
 [ -e $DIR/cluster ] && rm -rf $DIR/cluster
 mkdir $DIR/cluster
-IP="$(get_ip $1)"
+IP="$(get_ip $master_id)"
 scp -i ~/.ssh/id_rsa -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -r core@${IP}:/home/core/assets/* $DIR/cluster
 ssh -i ~/.ssh/id_rsa -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -tt "core@$IP" "rm -rf /home/core/bootstrap.sh"
 mkdir -p $HOME/.kube
