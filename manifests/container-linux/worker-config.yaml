@@ -1,0 +1,320 @@
+passwd:
+  users:
+    - name: core
+      ssh_authorized_keys:
+        - "$SSH_KEY"
+storage:
+  files:
+    - path: "/etc/traefik/acme/acme.json"
+      filesystem: root
+      contents:
+        inline: |
+      mode: 0600
+    - path: /opt/bin/scw-metadata
+      filesystem: root
+      contents:
+        inline: |
+          #!/bin/sh
+          # description "executable which retrieves server metadata (TEXT)"
+          # author "Scaleway <opensource@scaleway.com>"
+
+          export PATH="${PATH:+$PATH:}/usr/bin:/bin"
+
+          CACHE_FILE=/run/scw-metadata.cache
+          METADATA_IP=${METADATA_IP:-169.254.42.42}
+          METADATA_URL=${METADATA_URL:-"http://${METADATA_IP}/conf"}
+
+          if [ "$1" = "--cached" -a -f $CACHE_FILE ]; then
+              shift
+              BODY=$(cat $CACHE_FILE)
+          else
+              [ "$1" = "--cached" ] && shift
+              if hash curl 2>/dev/null; then
+                  # Using curl
+                  CODE=0
+                  while [ $CODE -ne 200 ]; do
+                      RESPONSE=$(curl --noproxy '*' --silent --write-out "\n%{http_CODE}\n" $METADATA_URL)
+                      CODE=$(echo "$RESPONSE" | sed -n '$p')
+                      BODY=$(echo "$RESPONSE" | sed '$d')
+
+                      if [ $CODE -eq 200 ]; then
+                          echo "$BODY" > /run/scw-metadata.cache
+                          ln -s scw-metadata.cache /run/oc-metadata.cache 2>/dev/null
+                          break
+                      fi
+                      sleep 5
+                  done
+              else
+                  # Using wget
+                  for i in 1 2 3 4 5; do
+                      BODY=$(wget --no-proxy --quiet -O- $METADATA_URL)
+                      echo "$BODY" | grep PRIVATE_IP >/dev/null
+                      if [ $? -eq 0 ]; then
+                          echo "$BODY" > /run/scw-metadata.cache
+                          ln -s scw-metadata.cache /run/oc-metadata.cache 2>/dev/null
+                          break
+                      fi
+                      sleep 2
+                  done
+              fi
+          fi
+
+          if [ "$#" -ne 1 ]; then
+              echo "$BODY"
+          else
+              key="$1"
+              echo "$BODY" | grep "^$key=" | sed "s/^[^=]*=//;s/^['\"]//;s/['\"]$//"
+          fi
+      mode: 0755
+    - path: /opt/bin/scw-userdata
+      filesystem: root
+      contents:
+        inline: |
+          #!/bin/sh
+          # description "executable which retrieves server userdata (TEXT)"
+          # author "Scaleway <opensource@scaleway.com>"
+
+          export PATH="${PATH:+$PATH:}/usr/bin:/bin"
+
+          USERDATA_IP=${USERDATA_IP:-169.254.42.42}
+          USERDATA_URL=${USERDATA_URL:-"http://${USERDATA_IP}/user_data"}
+
+          get() {
+              URL=$1
+              if type curl >/dev/null 2>/dev/null; then
+                  # Using curl
+                  RESPONSE=$(curl --local-port 1-1024 --noproxy '*' --silent --write-out "\n%{http_CODE}\n" $URL)
+                  CODE=$(echo "$RESPONSE" | sed -n '$p')
+                  BODY=$(echo "$RESPONSE" | sed '$d')
+                  echo "$BODY"
+              else
+                  echo "'curl' dependency is missing." >&2
+              fi
+          }
+
+          patch() {
+              URL="$1"
+              DATA="$2"
+              if type curl >/dev/null 2>/dev/null; then
+                  # Using curl
+                  RESPONSE=$(curl --local-port 1-1024 --noproxy '*' -X PATCH -d "$DATA" -H "Content-Type: text/plain" --silent --write-out "\n%{http_CODE}\n" $URL)
+              else
+                  echo "'curl' dependency is missing." >&2
+              fi
+          }
+
+          if [ "$1" = "" ]; then
+              get "$USERDATA_URL/"
+          else
+              if [ "$2" = "" ]; then
+                  get "$USERDATA_URL/$1"
+              else
+                  patch "$USERDATA_URL/$1" "$2"
+              fi
+          fi
+      mode: 0755
+    - path: /etc/kubernetes/kubelet.env
+      filesystem: root
+      mode: 0644
+      contents:
+        inline: |
+          KUBELET_IMAGE_URL=docker://gcr.io/google_containers/hyperkube
+          KUBELET_IMAGE_TAG=v1.8.5
+    - path: /etc/sysctl.d/max-user-watches.conf
+      filesystem: root
+      contents:
+        inline: |
+          fs.inotify.max_user_watches=16184
+    - path: /etc/kubernetes/delete-node
+      filesystem: root
+      mode: 0744
+      contents:
+        inline: |
+          #!/bin/bash
+          set -e
+          exec /usr/bin/rkt run \
+            --trust-keys-from-https \
+            --volume config,kind=host,source=/etc/kubernetes \
+            --mount volume=config,target=/etc/kubernetes \
+            --insecure-options=image \
+            docker://gcr.io/google_containers/hyperkube:v1.8.5 \
+            --net=host \
+            --dns=host \
+            --exec=/kubectl -- --kubeconfig=/etc/kubernetes/kubeconfig delete node ${COREOS_PRIVATE_IPV4}
+    - path: /home/core/bootstrap.sh
+      filesystem: root
+      mode: 0700
+      contents:
+        inline: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          # Setup kubeconfig
+          mkdir -p /etc/kubernetes
+          cp /home/core/kubeconfig /etc/kubernetes/kubeconfig
+          # Pulled out of the kubeconfig. Other installations should place the root
+          # CA here manually.
+          grep 'certificate-authority-data' /home/core/kubeconfig | awk '{print $2}' | base64 -d > /etc/kubernetes/ca.crt
+
+          # Start services
+          systemctl daemon-reload
+          systemctl stop update-engine
+          systemctl mask update-engine
+          systemctl enable kubelet
+          sudo systemctl start kubelet
+networkd:
+  units:
+    - name: 00-eth0.network
+      contents: |
+        [Match]
+        Name=eth0
+
+        [Network]
+        DHCP=yes
+        DNS=10.1.31.38
+        DNS=10.1.31.39
+        Domains=scaleway.com
+systemd:
+  units:
+    - name: scw-signal-boot.service
+      enable: true
+      contents: |
+        [Unit]
+        Description=Signals a successfull boot to Scaleways monitor
+        After=network-online.target systemd-networkd-wait-online.service
+        Requires=network-online.target systemd-networkd-wait-online.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        ExecStart=/bin/curl \
+          --fail --silent --show-error --location \
+          --connect-timeout 1 --max-time 5 \
+          -X PATCH -H 'Content-Type: application/json' \
+          http://169.254.42.42/state \
+          -d '{"state_detail": "booted"}'
+
+        [Install]
+        WantedBy=multi-user.target
+    - name: scw-set-environment-file.service
+      enable: true
+      contents: |
+        [Unit]
+        Description=Converts Scaleways metadata to /etc/environment
+        After=network-online.target systemd-networkd-wait-online.service
+        Requires=network-online.target systemd-networkd-wait-online.service
+
+        [Service]
+        Type=oneshot
+        Environment=PATH=/opt/sbin:/opt/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        ExecStart=/usr/bin/bash -c "\
+          /opt/bin/scw-metadata | \
+          grep -F -e 'PUBLIC_IP_ADDRESS' -e 'IPV6' -e 'PRIVATE_IP' -e 'HOSTNAME' | \
+          sed -e 's/^HOSTNAME/SCW_HOSTNAME/;s/^PUBLIC_IP_ADDRESS/COREOS_PUBLIC_IPV4/;s/^PRIVATE_IP/COREOS_PRIVATE_IPV4/;s/^IPV6/COREOS_PUBLIC_IPV6/' | \
+          sort >/etc/environment"
+
+        [Install]
+        WantedBy=multi-user.target
+    - name: scw-set-hostname.service
+      enable: true
+      contents: |
+        [Unit]
+        Description=Sets the hostname according to /etc/environment
+        After=scw-set-environment-file.service
+        Requires=scw-set-environment-file.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        EnvironmentFile=/etc/environment
+        ExecStart=/usr/bin/hostnamectl set-hostname "$SCW_HOSTNAME"
+
+        [Install]
+        WantedBy=multi-user.target
+    - name: docker.service
+      enable: true
+    - name: locksmithd.service
+      mask: true
+    - name: kubelet.path
+      enable: true
+      contents: |
+        [Unit]
+        Description=Watch for kubeconfig
+        [Path]
+        PathExists=/etc/kubernetes/kubeconfig
+        [Install]
+        WantedBy=multi-user.target
+    - name: wait-for-dns.service
+      enable: true
+      contents: |
+        [Unit]
+        Description=Wait for DNS entries
+        Wants=systemd-resolved.service
+        Before=kubelet.service
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        ExecStart=/bin/sh -c 'while ! /usr/bin/grep '^[^#[:space:]]' /etc/resolv.conf > /dev/null; do sleep 1; done'
+        [Install]
+        RequiredBy=kubelet.service
+    - name: delete-node.service
+      enable: true
+      contents: |
+        [Unit]
+        Description=Waiting to delete Kubernetes node on shutdown
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        ExecStart=/bin/true
+        ExecStop=/etc/kubernetes/delete-node
+        [Install]
+        WantedBy=multi-user.target
+    - name: kubelet.service
+      contents: |
+        [Unit]
+        Description=Kubelet via Hyperkube ACI
+        Requires=scw-set-hostname.service
+        After=scw-set-hostname.service
+        Wants=rpc-statd.service
+        [Service]
+        EnvironmentFile=/etc/kubernetes/kubelet.env
+        EnvironmentFile=/etc/environment
+        Environment="RKT_RUN_ARGS=--uuid-file-save=/var/cache/kubelet-pod.uuid \
+          --volume=resolv,kind=host,source=/etc/resolv.conf \
+          --mount volume=resolv,target=/etc/resolv.conf \
+          --volume var-lib-cni,kind=host,source=/var/lib/cni \
+          --mount volume=var-lib-cni,target=/var/lib/cni \
+          --volume opt-cni-bin,kind=host,source=/opt/cni/bin \
+          --mount volume=opt-cni-bin,target=/opt/cni/bin \
+          --volume var-log,kind=host,source=/var/log \
+          --mount volume=var-log,target=/var/log \
+          --insecure-options=image"
+        ExecStartPre=/bin/mkdir -p /opt/cni/bin
+        ExecStartPre=/bin/mkdir -p /etc/kubernetes/manifests
+        ExecStartPre=/bin/mkdir -p /etc/kubernetes/cni/net.d
+        ExecStartPre=/bin/mkdir -p /etc/kubernetes/checkpoint-secrets
+        ExecStartPre=/bin/mkdir -p /etc/kubernetes/inactive-manifests
+        ExecStartPre=/bin/mkdir -p /var/lib/cni
+        ExecStartPre=/bin/mkdir -p /var/lib/kubelet/volumeplugins
+        ExecStartPre=-/usr/bin/rkt rm --uuid-file=/var/cache/kubelet-pod.uuid
+        ExecStart=/usr/lib/coreos/kubelet-wrapper \
+          --allow-privileged \
+          --anonymous-auth=false \
+          --client-ca-file=/etc/kubernetes/ca.crt \
+          --cloud-provider= \
+          --cluster_dns=10.3.0.10 \
+          --cluster_domain=cluster.local \
+          --cni-conf-dir=/etc/kubernetes/cni/net.d \
+          --exit-on-lock-contention \
+          --hostname-override=${COREOS_PRIVATE_IPV4} \
+          --kubeconfig=/etc/kubernetes/kubeconfig \
+          --lock-file=/var/run/lock/kubelet.lock \
+          --network-plugin=cni \
+          --node-labels=node-role.kubernetes.io/node \
+          --pod-manifest-path=/etc/kubernetes/manifests \
+          --volume-plugin-dir=/var/lib/kubelet/volumeplugins
+        ExecStop=-/usr/bin/rkt stop --uuid-file=/var/cache/kubelet-pod.uuid
+        Restart=always
+        RestartSec=10
+        [Install]
+        WantedBy=multi-user.target

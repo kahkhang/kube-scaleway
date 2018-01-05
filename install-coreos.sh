@@ -1,9 +1,13 @@
 #!/bin/bash
-apt-get update
-apt-get -y install gawk bzip2
-wget --quiet https://raw.githubusercontent.com/coreos/init/master/bin/coreos-install
+set -e
+wget --no-check-certificate https://github.com/coreos/container-linux-config-transpiler/releases/download/v0.5.0/ct-v0.5.0-x86_64-unknown-linux-gnu -O ct
+chmod u+x ct
+if [ -e container-linux-config.json ]; then rm container-linux-config.json; fi
+./ct --in-file container-linux-config.yaml | sed "s/\$SSH_KEY/$(cat ~/.ssh/authorized_keys | grep '^ssh-rsa' | sed -n 1p | sed 's/\//\\\//g')/g" > container-linux-config.json
+apt-get update && apt-get -y install gawk bzip2
+wget --quiet https://raw.githubusercontent.com/coreos/init/master/bin/coreos-install -O coreos-install
 chmod u+x coreos-install
-./coreos-install -d /dev/vda -i /root/container-linux-config.json
+./coreos-install -d /dev/vda -i container-linux-config.json
 
 # apt-get update
 # apt-get -y install gawk bzip2 cpio

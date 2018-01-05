@@ -1,0 +1,380 @@
+passwd:
+  users:
+    - name: core
+      ssh_authorized_keys:
+        - "$SSH_KEY"
+storage:
+  files:
+    - path: "/etc/traefik/acme/acme.json"
+      filesystem: root
+      contents:
+        inline: |
+      mode: 0600
+    - path: /opt/bin/scw-metadata
+      filesystem: root
+      contents:
+        inline: |
+          #!/bin/sh
+          # description "executable which retrieves server metadata (TEXT)"
+          # author "Scaleway <opensource@scaleway.com>"
+
+          export PATH="${PATH:+$PATH:}/usr/bin:/bin"
+
+          CACHE_FILE=/run/scw-metadata.cache
+          METADATA_IP=${METADATA_IP:-169.254.42.42}
+          METADATA_URL=${METADATA_URL:-"http://${METADATA_IP}/conf"}
+
+          if [ "$1" = "--cached" -a -f $CACHE_FILE ]; then
+              shift
+              BODY=$(cat $CACHE_FILE)
+          else
+              [ "$1" = "--cached" ] && shift
+              if hash curl 2>/dev/null; then
+                  # Using curl
+                  CODE=0
+                  while [ $CODE -ne 200 ]; do
+                      RESPONSE=$(curl --noproxy '*' --silent --write-out "\n%{http_CODE}\n" $METADATA_URL)
+                      CODE=$(echo "$RESPONSE" | sed -n '$p')
+                      BODY=$(echo "$RESPONSE" | sed '$d')
+
+                      if [ $CODE -eq 200 ]; then
+                          echo "$BODY" > /run/scw-metadata.cache
+                          ln -s scw-metadata.cache /run/oc-metadata.cache 2>/dev/null
+                          break
+                      fi
+                      sleep 5
+                  done
+              else
+                  # Using wget
+                  for i in 1 2 3 4 5; do
+                      BODY=$(wget --no-proxy --quiet -O- $METADATA_URL)
+                      echo "$BODY" | grep PRIVATE_IP >/dev/null
+                      if [ $? -eq 0 ]; then
+                          echo "$BODY" > /run/scw-metadata.cache
+                          ln -s scw-metadata.cache /run/oc-metadata.cache 2>/dev/null
+                          break
+                      fi
+                      sleep 2
+                  done
+              fi
+          fi
+
+          if [ "$#" -ne 1 ]; then
+              echo "$BODY"
+          else
+              key="$1"
+              echo "$BODY" | grep "^$key=" | sed "s/^[^=]*=//;s/^['\"]//;s/['\"]$//"
+          fi
+      mode: 0755
+    - path: /opt/bin/scw-userdata
+      filesystem: root
+      contents:
+        inline: |
+          #!/bin/sh
+          # description "executable which retrieves server userdata (TEXT)"
+          # author "Scaleway <opensource@scaleway.com>"
+
+          export PATH="${PATH:+$PATH:}/usr/bin:/bin"
+
+          USERDATA_IP=${USERDATA_IP:-169.254.42.42}
+          USERDATA_URL=${USERDATA_URL:-"http://${USERDATA_IP}/user_data"}
+
+          get() {
+              URL=$1
+              if type curl >/dev/null 2>/dev/null; then
+                  # Using curl
+                  RESPONSE=$(curl --local-port 1-1024 --noproxy '*' --silent --write-out "\n%{http_CODE}\n" $URL)
+                  CODE=$(echo "$RESPONSE" | sed -n '$p')
+                  BODY=$(echo "$RESPONSE" | sed '$d')
+                  echo "$BODY"
+              else
+                  echo "'curl' dependency is missing." >&2
+              fi
+          }
+
+          patch() {
+              URL="$1"
+              DATA="$2"
+              if type curl >/dev/null 2>/dev/null; then
+                  # Using curl
+                  RESPONSE=$(curl --local-port 1-1024 --noproxy '*' -X PATCH -d "$DATA" -H "Content-Type: text/plain" --silent --write-out "\n%{http_CODE}\n" $URL)
+              else
+                  echo "'curl' dependency is missing." >&2
+              fi
+          }
+
+          if [ "$1" = "" ]; then
+              get "$USERDATA_URL/"
+          else
+              if [ "$2" = "" ]; then
+                  get "$USERDATA_URL/$1"
+              else
+                  patch "$USERDATA_URL/$1" "$2"
+              fi
+          fi
+      mode: 0755
+    - path: /etc/kubernetes/kubelet.env
+      filesystem: root
+      mode: 0644
+      contents:
+        inline: |
+          KUBELET_IMAGE_URL=docker://gcr.io/google_containers/hyperkube
+          KUBELET_IMAGE_TAG=v1.8.5
+    - path: /etc/sysctl.d/max-user-watches.conf
+      filesystem: root
+      contents:
+        inline: |
+          fs.inotify.max_user_watches=16184
+    - path: /opt/bootkube/bootkube-start
+      filesystem: root
+      mode: 0544
+      user:
+        id: 500
+      group:
+        id: 500
+      contents:
+        inline: |
+          #!/bin/bash
+          # Wrapper for bootkube start
+          set -e
+          # Move experimental manifests
+          [ -n "$(ls /opt/bootkube/assets/manifests-*/* 2>/dev/null)" ] && \
+            mv /opt/bootkube/assets/manifests-*/* /opt/bootkube/assets/manifests && \
+            rm -rf /opt/bootkube/assets/manifests-*
+
+          BOOTKUBE_ACI="${BOOTKUBE_ACI:-quay.io/coreos/bootkube}"
+          BOOTKUBE_VERSION="${BOOTKUBE_VERSION:-v0.9.1}"
+          BOOTKUBE_ASSETS="${BOOTKUBE_ASSETS:-/opt/bootkube/assets}"
+
+          # ======== START OF RESOURCE RENDERING ===========
+          sudo mkdir -p /opt/bootkube /etc/kubernetes
+          [ -e /opt/bootkube/assets ] && sudo rm -rf /opt/bootkube/assets
+          [ -e /etc/systemd/system/etcd-member.service.d/10-etcd-member.conf ] && sudo rm /etc/systemd/system/etcd-member.service.d/10-etcd-member.conf
+
+          function configure_etcd() {
+              [ -f "/etc/systemd/system/etcd-member.service.d/10-etcd-member.conf" ] || {
+                  sudo mkdir -p /etc/etcd/tls
+                  sudo cp ${BOOTKUBE_ASSETS}/tls/etcd-* /etc/etcd/tls
+                  sudo mkdir -p /etc/etcd/tls/etcd
+                  sudo cp ${BOOTKUBE_ASSETS}/tls/etcd/* /etc/etcd/tls/etcd
+                  sudo chown -R etcd:etcd /etc/etcd
+                  sudo chmod -R u=rX,g=,o= /etc/etcd
+                  sudo mkdir -p /etc/systemd/system/etcd-member.service.d
+                  sudo cat << EOF > /etc/systemd/system/etcd-member.service.d/10-etcd-member.conf
+          [Service]
+          Environment="ETCD_IMAGE_TAG=v3.2.0"
+          Environment="ETCD_NAME=controller"
+          Environment="ETCD_INITIAL_CLUSTER=controller=https://${COREOS_PRIVATE_IPV4}:2380"
+          Environment="ETCD_INITIAL_ADVERTISE_PEER_URLS=https://${COREOS_PRIVATE_IPV4}:2380"
+          Environment="ETCD_ADVERTISE_CLIENT_URLS=https://${COREOS_PRIVATE_IPV4}:2379"
+          Environment="ETCD_LISTEN_CLIENT_URLS=https://0.0.0.0:2379"
+          Environment="ETCD_LISTEN_PEER_URLS=https://0.0.0.0:2380"
+          Environment="ETCD_SSL_DIR=/etc/etcd/tls"
+          Environment="ETCD_TRUSTED_CA_FILE=/etc/ssl/certs/etcd/server-ca.crt"
+          Environment="ETCD_CERT_FILE=/etc/ssl/certs/etcd/server.crt"
+          Environment="ETCD_KEY_FILE=/etc/ssl/certs/etcd/server.key"
+          Environment="ETCD_CLIENT_CERT_AUTH=true"
+          Environment="ETCD_PEER_TRUSTED_CA_FILE=/etc/ssl/certs/etcd/peer-ca.crt"
+          Environment="ETCD_PEER_CERT_FILE=/etc/ssl/certs/etcd/peer.crt"
+          Environment="ETCD_PEER_KEY_FILE=/etc/ssl/certs/etcd/peer.key"
+          EOF
+              }
+          }
+
+          sudo /usr/bin/rkt run \
+            --trust-keys-from-https \
+            --volume assets,kind=host,source=/opt/bootkube \
+            --mount volume=assets,target=/opt/bootkube \
+            --volume bootstrap,kind=host,source=/etc/kubernetes \
+            --mount volume=bootstrap,target=/etc/kubernetes \
+            ${RKT_OPTS} \
+            ${BOOTKUBE_ACI}:${BOOTKUBE_VERSION} \
+            --net=host \
+            --dns=host \
+            --exec=/bootkube -- render --asset-dir=/opt/bootkube/assets \
+            --etcd-servers=https://${COREOS_PRIVATE_IPV4}:2379 \
+            --network-provider=flannel \
+            --api-servers=https://${COREOS_PUBLIC_IPV4}:6443,https://${COREOS_PRIVATE_IPV4}:6443
+
+          sudo mkdir -p /etc/kubernetes
+          sudo cp ${BOOTKUBE_ASSETS}/auth/kubeconfig /etc/kubernetes/
+          sudo cp ${BOOTKUBE_ASSETS}/tls/ca.crt /etc/kubernetes/ca.crt
+
+          configure_etcd
+          sudo systemctl enable etcd-member; sudo systemctl start etcd-member
+          sudo systemctl enable kubelet; sudo systemctl start kubelet
+
+          # ======= END OF RESOURCE RENDERING ========
+
+          exec /usr/bin/rkt run \
+            --trust-keys-from-https \
+            --volume assets,kind=host,source=${BOOTKUBE_ASSETS} \
+            --mount volume=assets,target=/assets \
+            --volume bootstrap,kind=host,source=/etc/kubernetes \
+            --mount volume=bootstrap,target=/etc/kubernetes \
+            ${RKT_OPTS} \
+            ${BOOTKUBE_ACI}:${BOOTKUBE_VERSION} \
+            --net=host \
+            --dns=host \
+            --exec=/bootkube -- start --asset-dir=/assets "$@"
+networkd:
+  units:
+    - name: 00-eth0.network
+      contents: |
+        [Match]
+        Name=eth0
+
+        [Network]
+        DHCP=yes
+        DNS=10.1.31.38
+        DNS=10.1.31.39
+        Domains=scaleway.com
+systemd:
+  units:
+    - name: scw-signal-boot.service
+      enable: true
+      contents: |
+        [Unit]
+        Description=Signals a successfull boot to Scaleways monitor
+        After=network-online.target systemd-networkd-wait-online.service
+        Requires=network-online.target systemd-networkd-wait-online.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        ExecStart=/bin/curl \
+          --fail --silent --show-error --location \
+          --connect-timeout 1 --max-time 5 \
+          -X PATCH -H 'Content-Type: application/json' \
+          http://169.254.42.42/state \
+          -d '{"state_detail": "booted"}'
+
+        [Install]
+        WantedBy=multi-user.target
+    - name: scw-set-environment-file.service
+      enable: true
+      contents: |
+        [Unit]
+        Description=Converts Scaleways metadata to /etc/environment
+        After=network-online.target systemd-networkd-wait-online.service
+        Requires=network-online.target systemd-networkd-wait-online.service
+
+        [Service]
+        Type=oneshot
+        Environment=PATH=/opt/sbin:/opt/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        ExecStart=/usr/bin/bash -c "\
+          /opt/bin/scw-metadata | \
+          grep -F -e 'PUBLIC_IP_ADDRESS' -e 'IPV6' -e 'PRIVATE_IP' -e 'HOSTNAME' | \
+          sed -e 's/^HOSTNAME/SCW_HOSTNAME/;s/^PUBLIC_IP_ADDRESS/COREOS_PUBLIC_IPV4/;s/^PRIVATE_IP/COREOS_PRIVATE_IPV4/;s/^IPV6/COREOS_PUBLIC_IPV6/' | \
+          sort >/etc/environment"
+
+        [Install]
+        WantedBy=multi-user.target
+    - name: scw-set-hostname.service
+      enable: true
+      contents: |
+        [Unit]
+        Description=Sets the hostname according to /etc/environment
+        After=scw-set-environment-file.service
+        Requires=scw-set-environment-file.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        EnvironmentFile=/etc/environment
+        ExecStart=/usr/bin/hostnamectl set-hostname "$SCW_HOSTNAME"
+
+        [Install]
+        WantedBy=multi-user.target
+    - name: docker.service
+      enable: true
+    - name: locksmithd.service
+      mask: true
+    - name: kubelet.path
+      enable: true
+      contents: |
+        [Unit]
+        Description=Watch for kubeconfig
+        [Path]
+        PathExists=/etc/kubernetes/kubeconfig
+        [Install]
+        WantedBy=multi-user.target
+    - name: wait-for-dns.service
+      enable: true
+      contents: |
+        [Unit]
+        Description=Wait for DNS entries
+        Wants=systemd-resolved.service
+        Before=kubelet.service
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        ExecStart=/bin/sh -c 'while ! /usr/bin/grep '^[^#[:space:]]' /etc/resolv.conf > /dev/null; do sleep 1; done'
+        [Install]
+        RequiredBy=kubelet.service
+    - name: bootkube.service
+      contents: |
+        [Unit]
+        Description=Bootstrap a Kubernetes cluster
+        ConditionPathExists=!/opt/bootkube/init_bootkube.done
+        Requires=scw-set-hostname.service
+        After=scw-set-hostname.service
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        EnvironmentFile=/etc/environment
+        WorkingDirectory=/opt/bootkube
+        ExecStart=/opt/bootkube/bootkube-start
+        ExecStartPost=/bin/touch /opt/bootkube/init_bootkube.done
+        [Install]
+        WantedBy=multi-user.target
+    - name: kubelet.service
+      contents: |
+        [Unit]
+        Description=Kubelet via Hyperkube ACI
+        Requires=scw-set-hostname.service
+        After=scw-set-hostname.service
+        Wants=rpc-statd.service
+        [Service]
+        EnvironmentFile=/etc/kubernetes/kubelet.env
+        EnvironmentFile=/etc/environment
+        Environment="RKT_RUN_ARGS=--uuid-file-save=/var/cache/kubelet-pod.uuid \
+          --volume=resolv,kind=host,source=/etc/resolv.conf \
+          --mount volume=resolv,target=/etc/resolv.conf \
+          --volume var-lib-cni,kind=host,source=/var/lib/cni \
+          --mount volume=var-lib-cni,target=/var/lib/cni \
+          --volume opt-cni-bin,kind=host,source=/opt/cni/bin \
+          --mount volume=opt-cni-bin,target=/opt/cni/bin \
+          --volume var-log,kind=host,source=/var/log \
+          --mount volume=var-log,target=/var/log \
+          --insecure-options=image"
+        ExecStartPre=/bin/mkdir -p /opt/cni/bin
+        ExecStartPre=/bin/mkdir -p /etc/kubernetes/manifests
+        ExecStartPre=/bin/mkdir -p /etc/kubernetes/cni/net.d
+        ExecStartPre=/bin/mkdir -p /etc/kubernetes/checkpoint-secrets
+        ExecStartPre=/bin/mkdir -p /etc/kubernetes/inactive-manifests
+        ExecStartPre=/bin/mkdir -p /var/lib/cni
+        ExecStartPre=/bin/mkdir -p /var/lib/kubelet/volumeplugins
+        ExecStartPre=-/usr/bin/rkt rm --uuid-file=/var/cache/kubelet-pod.uuid
+        ExecStart=/usr/lib/coreos/kubelet-wrapper \
+          --allow-privileged \
+          --anonymous-auth=false \
+          --client-ca-file=/etc/kubernetes/ca.crt \
+          --cloud-provider= \
+          --cluster_dns=10.3.0.10 \
+          --cluster_domain=cluster.local \
+          --cni-conf-dir=/etc/kubernetes/cni/net.d \
+          --exit-on-lock-contention \
+          --hostname-override=${COREOS_PRIVATE_IPV4} \
+          --kubeconfig=/etc/kubernetes/kubeconfig \
+          --lock-file=/var/run/lock/kubelet.lock \
+          --network-plugin=cni \
+          --node-labels=node-role.kubernetes.io/master \
+          --pod-manifest-path=/etc/kubernetes/manifests \
+          --register-with-taints=node-role.kubernetes.io/master=:NoSchedule \
+          --volume-plugin-dir=/var/lib/kubelet/volumeplugins
+        ExecStop=-/usr/bin/rkt stop --uuid-file=/var/cache/kubelet-pod.uuid
+        Restart=always
+        RestartSec=10
+        [Install]
+        WantedBy=multi-user.target
