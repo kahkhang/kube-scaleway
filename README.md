@@ -1,6 +1,6 @@
 # Kubernetes on Scaleway
 
-Work in progress.
+Work in progress. Because of the slow-stream binary, this only works on Mac OS X at the moment.
 
 `./kube-scalway.sh` to run the script.
 
